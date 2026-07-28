@@ -1,0 +1,24 @@
+{
+  "customerName": "Luis",
+  "items": [
+    {
+      "name": "Hambúrguer artesanal",
+      "quantity": 1,
+      "unitPrice": 28.9
+    },
+    {
+      "name": "Refrigerante",
+      "quantity": 2,
+      "unitPrice": 7.5
+    }
+  ],
+  "total": 43.9,
+  "payment": {
+    "method": "PIX"
+  },
+  "delivery": {
+    "city": "Aracaju",
+    "neighborhood": "Centro"
+  },
+  "notes": "Sem cebola"
+}
