@@ -1,0 +1,19 @@
+{
+  "customerName": "Luis",
+  "items": [
+    {
+      "name": "Pizza grande",
+      "quantity": 1,
+      "unitPrice": 54.9
+    }
+  ],
+  "total": 54.9,
+  "payment": {
+    "method": "CARD",
+    "simulateFailure": true
+  },
+  "delivery": {
+    "city": "Aracaju",
+    "neighborhood": "Centro"
+  }
+}
