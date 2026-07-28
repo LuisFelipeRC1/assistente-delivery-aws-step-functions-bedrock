@@ -1,0 +1,200 @@
+{
+  "Comment": "Fluxo de delivery com validação, Amazon Bedrock, pagamento simulado e atualização de status.",
+  "StartAt": "ValidateOrder",
+  "States": {
+    "ValidateOrder": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${ValidateOrderFunctionArn}",
+        "Payload": {"order.$": "$.order"}
+      },
+      "ResultPath": "$.validation",
+      "Retry": [{
+        "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+        "IntervalSeconds": 2,
+        "MaxAttempts": 3,
+        "BackoffRate": 2
+      }],
+      "Next": "IsOrderValid"
+    },
+    "IsOrderValid": {
+      "Type": "Choice",
+      "Choices": [{
+        "Variable": "$.validation.Payload.valid",
+        "BooleanEquals": true,
+        "Next": "SetValidatedStatus"
+      }],
+      "Default": "SetValidationFailureStatus"
+    },
+    "SetValidationFailureStatus": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${UpdateStatusFunctionArn}",
+        "Payload": {
+          "orderId.$": "$.order.orderId",
+          "status": "FAILED_VALIDATION",
+          "details.$": "$.validation.Payload.errors"
+        }
+      },
+      "ResultPath": "$.statusUpdate",
+      "Next": "InvalidOrder"
+    },
+    "InvalidOrder": {
+      "Type": "Fail",
+      "Error": "InvalidOrder",
+      "Cause": "O pedido não passou pela validação."
+    },
+    "SetValidatedStatus": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${UpdateStatusFunctionArn}",
+        "Payload": {"orderId.$": "$.order.orderId", "status": "VALIDATED"}
+      },
+      "ResultPath": "$.statusUpdate",
+      "Next": "GeneratePersonalizedMessage"
+    },
+    "GeneratePersonalizedMessage": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::bedrock:invokeModel",
+      "Parameters": {
+        "ModelId": "${BedrockModelId}",
+        "ContentType": "application/json",
+        "Accept": "application/json",
+        "Body": {
+          "system": [{"text": "Você é um assistente de delivery. Escreva mensagens curtas, educadas e objetivas em português do Brasil. Não invente valores, prazos ou endereços."}],
+          "messages": [{
+            "role": "user",
+            "content": [{
+              "text.$": "States.Format('Crie uma mensagem de confirmação para o pedido {}. Itens: {}. Informe apenas que o pedido entrou em processamento e que o status poderá ser consultado pela API.', $.order.orderId, States.JsonToString($.order.items))"
+            }]
+          }],
+          "inferenceConfig": {"maxTokens": 120, "temperature": 0.2, "topP": 0.9}
+        }
+      },
+      "ResultPath": "$.assistant",
+      "Retry": [{
+        "ErrorEquals": ["Bedrock.ThrottlingException", "Bedrock.ServiceUnavailableException", "States.Timeout"],
+        "IntervalSeconds": 2,
+        "MaxAttempts": 3,
+        "BackoffRate": 2
+      }],
+      "Catch": [{
+        "ErrorEquals": ["States.ALL"],
+        "ResultPath": "$.bedrockError",
+        "Next": "UseFallbackMessage"
+      }],
+      "Next": "SaveAssistantMessage"
+    },
+    "UseFallbackMessage": {
+      "Type": "Pass",
+      "Result": {"Body": {"output": {"message": {"content": [{"text": "Pedido recebido e enviado para processamento. Acompanhe o status pela API."}]}}}},
+      "ResultPath": "$.assistant",
+      "Next": "SaveAssistantMessage"
+    },
+    "SaveAssistantMessage": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${UpdateStatusFunctionArn}",
+        "Payload": {"orderId.$": "$.order.orderId", "assistant.$": "$.assistant"}
+      },
+      "ResultPath": "$.messageUpdate",
+      "Next": "SetPaymentPendingStatus"
+    },
+    "SetPaymentPendingStatus": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${UpdateStatusFunctionArn}",
+        "Payload": {"orderId.$": "$.order.orderId", "status": "PAYMENT_PENDING"}
+      },
+      "ResultPath": "$.statusUpdate",
+      "Next": "ProcessPayment"
+    },
+    "ProcessPayment": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${ProcessPaymentFunctionArn}",
+        "Payload": {"orderId.$": "$.order.orderId", "amount.$": "$.order.total", "payment.$": "$.order.payment"}
+      },
+      "ResultPath": "$.paymentResult",
+      "Retry": [{
+        "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+        "IntervalSeconds": 2,
+        "MaxAttempts": 3,
+        "BackoffRate": 2
+      }],
+      "Next": "WasPaymentApproved"
+    },
+    "WasPaymentApproved": {
+      "Type": "Choice",
+      "Choices": [{
+        "Variable": "$.paymentResult.Payload.approved",
+        "BooleanEquals": true,
+        "Next": "SetPaymentApprovedStatus"
+      }],
+      "Default": "SetPaymentFailedStatus"
+    },
+    "SetPaymentFailedStatus": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${UpdateStatusFunctionArn}",
+        "Payload": {"orderId.$": "$.order.orderId", "status": "PAYMENT_FAILED", "details.$": "$.paymentResult.Payload.reason"}
+      },
+      "ResultPath": "$.statusUpdate",
+      "Next": "PaymentFailed"
+    },
+    "PaymentFailed": {
+      "Type": "Fail",
+      "Error": "PaymentFailed",
+      "Cause": "O pagamento simulado não foi aprovado."
+    },
+    "SetPaymentApprovedStatus": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${UpdateStatusFunctionArn}",
+        "Payload": {"orderId.$": "$.order.orderId", "status": "PAYMENT_APPROVED", "details.$": "$.paymentResult.Payload.transactionId"}
+      },
+      "ResultPath": "$.statusUpdate",
+      "Next": "SetPreparingStatus"
+    },
+    "SetPreparingStatus": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${UpdateStatusFunctionArn}",
+        "Payload": {"orderId.$": "$.order.orderId", "status": "PREPARING"}
+      },
+      "ResultPath": "$.statusUpdate",
+      "Next": "WaitForPreparation"
+    },
+    "WaitForPreparation": {"Type": "Wait", "Seconds": 5, "Next": "SetOutForDeliveryStatus"},
+    "SetOutForDeliveryStatus": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${UpdateStatusFunctionArn}",
+        "Payload": {"orderId.$": "$.order.orderId", "status": "OUT_FOR_DELIVERY"}
+      },
+      "ResultPath": "$.statusUpdate",
+      "Next": "WaitForDelivery"
+    },
+    "WaitForDelivery": {"Type": "Wait", "Seconds": 5, "Next": "SetDeliveredStatus"},
+    "SetDeliveredStatus": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${UpdateStatusFunctionArn}",
+        "Payload": {"orderId.$": "$.order.orderId", "status": "DELIVERED"}
+      },
+      "ResultPath": "$.statusUpdate",
+      "End": true
+    }
+  }
+}
